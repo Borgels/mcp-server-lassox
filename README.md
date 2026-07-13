@@ -24,8 +24,11 @@ Supported Lassox APIs:
 - Build ownership / voting-rights graphs with optional UBO and report enrichment (Lassox Ownership Structure module).
 - Fetch Creditsafe credit ratings for companies (Lassox Creditsafe data API).
 - Look up registered phone numbers for a company, or reverse-lookup a phone number (Lassox Teledata data API).
+- Discover companies by firmographic criteria — industry, employees, form, founding date — within a postal-code geography (`cvr_segment_search`).
+- Read lists (tags) curated in the Lasso portal and change list membership (Lassox Lists API).
+- Fetch entities changed since a timestamp for downstream sync (Lassox delta endpoints).
 
-Report PDFs, delta polling, monitoring, webhooks, and other non-CVR Lassox APIs are intentionally out of scope.
+Report PDFs, monitoring, webhooks, and other non-CVR Lassox APIs are intentionally out of scope.
 
 ## Setup
 
@@ -98,7 +101,7 @@ Use `lassox_search_capabilities` first when an MCP client needs to decide which 
 
 ## Tools
 
-All tools are read-only and registered with MCP tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`) so clients can reason about safety.
+All tools are read-only — except `lassox_list_change`, which changes Lassox list membership (never CVR data). Every tool is registered with MCP tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`) so clients can reason about safety.
 
 ### `lassox_search_capabilities`
 
@@ -358,6 +361,117 @@ Supported combinations:
 
 Set `history` to `true` to call the relation history endpoint.
 
+### `cvr_segment_search`
+
+Discover companies matching firmographic criteria within a postal-code geography.
+
+```json
+{
+  "industryCodes": ["21"],
+  "employeesMin": 1000,
+  "region": "hovedstaden",
+  "maxRequests": 300
+}
+```
+
+The Lassox search API only supports free text plus address/contact filters
+server-side — industry, employees, company form, and founding date are **not**
+queryable upstream. This tool therefore scans companies per postal code
+(filter-only `postalcode:` searches), fetches candidates with the same bounded,
+429-retrying batch machinery as `cvr_batch_get_entities`, and applies the
+firmographic criteria locally:
+
+- `industryCodes` — DB07 codes, exact or prefix (`"21"` matches all 21xxxx).
+  Checked against `industry` and `altIndustry1-3` (disable the alt industries
+  with `includeAltIndustries=false`).
+- `employeesMin` / `employeesMax` — uses the registered `employees.count`; when
+  only an `ANTAL_*` interval is registered, a company matches if the interval
+  overlaps the requested range.
+- `companyForms` — form short names such as `A/S`, `ApS` (case-insensitive).
+- `foundedAfter` / `foundedBefore` — compared against `lifeTime.from`.
+- Geography (required): `postalCodes`, `postalCodeRanges` (`{from,to}`), or
+  `region` (`hovedstaden`, `sjaelland`, `syddanmark`, `midtjylland`,
+  `nordjylland` — approximated by postal ranges; pass explicit codes where
+  boundary precision matters).
+
+Every call is bounded by `maxRequests` (search pages + entity fetches; default
+150, max 500). The response reports `matched`, `scanned`, `requestsUsed`,
+postal-code `coverage`, and `exhausted`; when `exhausted=false`, pass the
+returned `continuationToken` (bound to the criteria) to keep scanning. Progress
+notifications are emitted when the client sends a `progressToken`.
+
+Broad segments cost many requests by nature (a whole region can hold hundreds
+of thousands of companies), so for nationwide discovery build the segment with
+the Lasso portal's target-group search and consume it via the Lists tools below.
+
+### `lassox_lists_index`
+
+Fetch the Lassox lists (tags) visible to the account — id, name, entity count,
+and permissions. Pass `userId` to read a specific user's private lists.
+
+```json
+{}
+```
+
+Lists are created and curated in the Lasso portal; the Lists API cannot create
+new lists.
+
+### `lassox_list_get_entities`
+
+Fetch the members of a list with `skip`/`take` pagination and optional `fields`
+projection:
+
+```json
+{
+  "tagId": "cHfb90",
+  "take": 100,
+  "fields": ["lassoId", "name"]
+}
+```
+
+### `lassox_list_change`
+
+Add or remove entities to/from lists in bulk. **This is the only write tool in
+the server** — it changes Lassox list membership, never CVR data — and it is
+annotated `readOnlyHint: false` and separately allowlisted in the policy module.
+
+```json
+{
+  "lassoIds": ["CVR-1-34580820"],
+  "tagsToAdd": ["cHfb90"],
+  "tagsToRemove": []
+}
+```
+
+1–1000 Lasso IDs per call; at least one of `tagsToAdd`/`tagsToRemove` is
+required, and a list cannot appear in both.
+
+### `cvr_get_changes`
+
+Fetch entities changed since a timestamp via the Lassox delta endpoints — for
+keeping a CRM or database in sync:
+
+```json
+{
+  "scope": "company",
+  "since": "2026-07-01",
+  "pageSize": 50,
+  "fields": ["lassoId", "name", "status", "lastUpdated"]
+}
+```
+
+- `scope` — `company` (default), `person`, `place`, or `reports`.
+- `useLastLoad` — defaults to `true` (recommended by Lassox: filters on
+  publication time so late-published changes are not missed; upstream flips its
+  own default on 2026-08-01). Tune the companion `maxDaysSinceUpdate` if needed.
+- `history=true` returns historical value wrappers (not for `reports`);
+  `metadataOnly=true` returns report metadata without the figures (`reports` only).
+- `lassoIds` filters the returned page client-side to just those entities;
+  `fields` projects each result.
+- Paginate with `continuationToken` (sent upstream as `cToken`).
+
+For real-time needs, prefer Lassox monitoring/webhooks over tight polling loops.
+
 ## Optional HTTP Server
 
 The local stdio transport is the default for agent compatibility. A small Streamable HTTP entrypoint is also available:
@@ -398,7 +512,7 @@ Lassox documents a limit of 500 requests per minute per API key. If Lassox retur
 - `LASSO_API_KEY` is read only from the MCP server environment.
 - API keys are never accepted as tool arguments.
 - Error formatting redacts `lasso-api-key`, `LASSO_API_KEY`, and `apiKey`-style secret material.
-- The server exposes only read-only CVR tools. A small policy module keeps that invariant explicit for future expansion.
+- CVR data is strictly read-only. The single write tool, `lassox_list_change`, only changes Lassox list membership and is separately allowlisted in the policy module and annotated `readOnlyHint: false`.
 - If `LASSO_AUDIT_LOG` is set, each tool call writes JSONL audit events with timestamp, request id, tool name, action, target hash, status, and redacted error text. Raw search/entity inputs and API keys are not written to the audit log.
 - Report suspected vulnerabilities privately to <security@borgels.com>. Do not
   include API keys, personal data, or other secrets in public GitHub issues.

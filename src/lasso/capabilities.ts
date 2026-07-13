@@ -1,4 +1,4 @@
-export type CapabilityRisk = 'read';
+export type CapabilityRisk = 'read' | 'write';
 
 export interface LassoCapability {
   id: string;
@@ -13,6 +13,14 @@ export interface LassoCapability {
 
 export const TOOL_ANNOTATIONS = {
   readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
+
+/** For the list-membership write tool: not read-only, but non-destructive and idempotent. */
+export const WRITE_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
   destructiveHint: false,
   idempotentHint: true,
   openWorldHint: true,
@@ -259,6 +267,102 @@ export const LASSO_CAPABILITIES: LassoCapability[] = [
       'ebitda',
       'working capital',
     ],
+  },
+  {
+    id: 'cvr_segment_search',
+    title: 'Segment Search (Firmographic Discovery)',
+    description:
+      'Discover companies matching firmographic criteria: industry code prefixes, employee counts, company forms, founding dates — anchored to postal codes, postal ranges, or a Danish region. Scans postal codes via Lassox search and filters fetched entities locally under a per-call request budget; resumable via continuationToken.',
+    risk: 'read',
+    examples: [
+      {
+        industryCodes: ['21'],
+        employeesMin: 1000,
+        region: 'hovedstaden',
+        maxRequests: 300,
+      },
+      {
+        industryCodes: ['10', '11'],
+        employeesMin: 50,
+        employeesMax: 500,
+        postalCodeRanges: [{ from: 7400, to: 7500 }],
+      },
+    ],
+    identifierFormats: ['DB07 industry code prefixes', '4-digit postal codes', 'Danish region names'],
+    safetyNotes: [
+      'Read-only. The Lassox API has no server-side firmographic search, so this scans postal codes and filters locally.',
+      'A geographic anchor (postalCodes, postalCodeRanges, or region) is required; broad segments take many calls — for nationwide segments use lists curated in the Lasso portal instead.',
+      'Bounded by maxRequests per call; resume with continuationToken until exhausted=true.',
+    ],
+    keywords: [
+      'segment',
+      'discovery',
+      'prospecting',
+      'firmographic',
+      'industry',
+      'branchekode',
+      'employees',
+      'region',
+      'målgruppe',
+      'target group',
+    ],
+  },
+  {
+    id: 'lassox_lists_index',
+    title: 'List Lassox Lists (Tags)',
+    description:
+      'Fetch the Lassox lists (tags) visible to the account — id, name, entity count, and permissions. Lists are curated in the Lasso portal (e.g. via target-group search) and consumed here.',
+    risk: 'read',
+    examples: [{}, { userId: 'user-id-for-private-lists' }],
+    identifierFormats: ['Optional Lassox userId for private lists.'],
+    safetyNotes: ['Read-only. Lists are created and curated in the Lasso portal; the API cannot create lists.'],
+    keywords: ['lists', 'tags', 'lister', 'segments', 'portal', 'index'],
+  },
+  {
+    id: 'lassox_list_get_entities',
+    title: 'Get Lassox List Members',
+    description:
+      'Fetch the entities in a Lassox list (tag) with skip/take pagination. Pass fields to project each entity down to the dot-paths you need.',
+    risk: 'read',
+    examples: [{ tagId: 'cHfb90', take: 100 }, { tagId: 'cHfb90', fields: ['lassoId', 'name'] }],
+    identifierFormats: ['tagId from lassox_lists_index.'],
+    safetyNotes: ['Read-only.'],
+    keywords: ['list members', 'tag entities', 'lists', 'segment members'],
+  },
+  {
+    id: 'lassox_list_change',
+    title: 'Change Lassox List Membership',
+    description:
+      'Add or remove entities (Lasso IDs) to/from Lassox lists (tags) in bulk. The only write tool in this server — it changes list membership, never CVR data.',
+    risk: 'write',
+    examples: [
+      { lassoIds: ['CVR-1-34580820'], tagsToAdd: ['cHfb90'] },
+      { lassoIds: ['CVR-1-34580820'], tagsToRemove: ['cHfb90'] },
+    ],
+    identifierFormats: ['CVR-{1|2|3}-{id} Lasso IDs', 'tagId from lassox_lists_index.'],
+    safetyNotes: [
+      'WRITE operation: modifies list membership in the shared Lasso portal.',
+      'Non-destructive and idempotent per (entity, list) pair; CVR data itself is never modified.',
+    ],
+    keywords: ['add to list', 'remove from list', 'tag', 'untag', 'write', 'membership'],
+  },
+  {
+    id: 'cvr_get_changes',
+    title: 'Get CVR Changes (Delta)',
+    description:
+      'Fetch entities changed since a timestamp via the Lassox delta endpoints — companies, persons, production units (places), or annual reports. Use for keeping downstream systems (e.g. a CRM) in sync. Supports useLastLoad (recommended, default true), pagination, optional client-side filtering to a set of Lasso IDs, and field projection.',
+    risk: 'read',
+    examples: [
+      { scope: 'company', since: '2026-07-01', pageSize: 50 },
+      { scope: 'reports', since: '2026-07-01', metadataOnly: true },
+      { scope: 'company', since: '2026-07-01', lassoIds: ['CVR-1-34580820'], fields: ['lassoId', 'name', 'status'] },
+    ],
+    identifierFormats: ['ISO date or datetime for since/max.'],
+    safetyNotes: [
+      'Read-only. useLastLoad=true is the Lassox-recommended default to avoid missing late-published changes.',
+      'For real-time needs consider Lassox monitoring/webhooks instead of tight polling loops.',
+    ],
+    keywords: ['delta', 'changes', 'sync', 'since', 'poll', 'updates', 'crm sync', 'pipedrive'],
   },
 ];
 

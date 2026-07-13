@@ -10,7 +10,7 @@ export interface CreateServerOptions {
 export function createServer(options: CreateServerOptions = {}): McpServer {
   const server = new McpServer({
     name: 'lassox-cvr',
-    version: '0.1.0',
+    version: '0.4.0',
   });
 
   const client = options.client ?? new LassoClient(options.clientOptions);
