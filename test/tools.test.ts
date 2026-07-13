@@ -24,12 +24,13 @@ describe('Lassox tool hardening', () => {
     }
   });
 
-  it('registers discovery and read-only annotations for every tool', () => {
+  it('registers discovery and correct annotations for every tool', () => {
     const registered = captureRegisteredTools();
 
     expect(Object.keys(registered)).toEqual([
       'lassox_search_capabilities',
       'cvr_search',
+      'cvr_segment_search',
       'cvr_get_entity',
       'cvr_batch_get_entities',
       'cvr_get_entity_history',
@@ -40,12 +41,18 @@ describe('Lassox tool hardening', () => {
       'creditsafe_get_rating',
       'teledata_get_company_phones',
       'teledata_lookup_phone',
+      'lassox_lists_index',
+      'lassox_list_get_entities',
+      'lassox_list_change',
+      'cvr_get_changes',
       'cvr_get_related',
     ]);
 
-    for (const tool of Object.values(registered)) {
+    const writeTools = new Set(['lassox_list_change']);
+
+    for (const [name, tool] of Object.entries(registered)) {
       expect(tool.config.annotations).toEqual({
-        readOnlyHint: true,
+        readOnlyHint: !writeTools.has(name),
         destructiveHint: false,
         idempotentHint: true,
         openWorldHint: true,
@@ -60,16 +67,24 @@ describe('Lassox tool hardening', () => {
     expect(results[0]?.examples.length).toBeGreaterThan(0);
   });
 
-  it('keeps the policy allowlist read-only', () => {
+  it('keeps the policy allowlist explicit about reads and the single write', () => {
     expect(checkToolPolicy('cvr_search')).toMatchObject({ allowed: true });
+    expect(checkToolPolicy('cvr_segment_search')).toMatchObject({ allowed: true });
     expect(checkToolPolicy('cvr_batch_get_entities')).toMatchObject({ allowed: true });
     expect(checkToolPolicy('cvr_get_reports')).toMatchObject({ allowed: true });
+    expect(checkToolPolicy('cvr_get_changes')).toMatchObject({ allowed: true });
     expect(checkToolPolicy('lassox_financial_analysis')).toMatchObject({ allowed: true });
+    expect(checkToolPolicy('lassox_lists_index')).toMatchObject({ allowed: true });
+    expect(checkToolPolicy('lassox_list_get_entities')).toMatchObject({ allowed: true });
     expect(checkToolPolicy('cvr_get_network')).toMatchObject({ allowed: true });
     expect(checkToolPolicy('cvr_get_ownership_graph')).toMatchObject({ allowed: true });
     expect(checkToolPolicy('creditsafe_get_rating')).toMatchObject({ allowed: true });
     expect(checkToolPolicy('teledata_get_company_phones')).toMatchObject({ allowed: true });
     expect(checkToolPolicy('teledata_lookup_phone')).toMatchObject({ allowed: true });
+    expect(checkToolPolicy('lassox_list_change')).toMatchObject({
+      allowed: true,
+      reason: 'allowlisted Lassox write tool (list membership only)',
+    });
     expect(checkToolPolicy('cvr_delete_entity')).toMatchObject({ allowed: false });
   });
 

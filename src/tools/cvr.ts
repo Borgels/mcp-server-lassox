@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod/v4';
 import { formatUnknownError } from '../errors.js';
 import { writeAuditEvent } from '../lasso/audit.js';
-import { searchCapabilities, TOOL_ANNOTATIONS } from '../lasso/capabilities.js';
+import { searchCapabilities, TOOL_ANNOTATIONS, WRITE_TOOL_ANNOTATIONS } from '../lasso/capabilities.js';
 import type { LassoClient } from '../lasso/client.js';
 import { MAX_BATCH_CONCURRENCY } from '../lasso/batch.js';
 import {
@@ -14,9 +14,17 @@ import {
   type CvrBatchProgress,
 } from '../lasso/cvr.js';
 import { getCreditsafeRating } from '../lasso/creditsafe.js';
+import { getCvrChanges } from '../lasso/delta.js';
 import { getCvrReports, getFinancialAnalysis } from '../lasso/financials.js';
+import { changeListMembers, getListEntities, getLists, MAX_LIST_CHANGE_IDS } from '../lasso/lists.js';
 import { getCvrNetwork, getOwnershipGraph } from '../lasso/network.js';
 import { checkToolPolicy } from '../lasso/policy.js';
+import {
+  DEFAULT_SEGMENT_REQUEST_BUDGET,
+  MAX_SEGMENT_REQUEST_BUDGET,
+  searchCvrSegment,
+  type SegmentProgress,
+} from '../lasso/segment.js';
 import { getCompanyPhoneNumbers, lookupPhoneNumber } from '../lasso/teledata.js';
 
 const entityInputShape = {
@@ -127,6 +135,61 @@ export function registerCvrTools(server: McpServer, client: LassoClient): void {
     },
     async input =>
       runAuditedTool('cvr_search', input, async () => jsonToolResult(await searchCvr(client, input))),
+  );
+
+  server.registerTool(
+    'cvr_segment_search',
+    {
+      title: 'Segment Search (Firmographic Discovery)',
+      description:
+        'Discover Danish companies matching firmographic criteria: DB07 industry code prefixes, employee counts, company forms, and founding dates — anchored to a geography (postalCodes, postalCodeRanges, or region; required). The Lassox API has no server-side firmographic search, so this tool scans companies per postal code and filters fetched entities locally under a per-call request budget (maxRequests). When the response has exhausted=false, call again with continuationToken to keep scanning. Broad nationwide segments take many calls — prefer lists curated in the Lasso portal (lassox_lists_index) for those. Emits progress notifications when the client sends a progressToken.',
+      inputSchema: {
+        industryCodes: z
+          .array(z.string().trim().regex(/^\d{1,6}$/, 'Use DB07 industry code digits, e.g. "21" or "620100".'))
+          .min(1)
+          .max(50)
+          .optional()
+          .describe('DB07 industry codes, exact or prefix ("21" matches all 21xxxx). Checked against industry and altIndustry1-3.'),
+        includeAltIndustries: z.boolean().default(true),
+        employeesMin: z.number().int().min(0).optional(),
+        employeesMax: z.number().int().min(0).optional(),
+        companyForms: z
+          .array(z.string().trim().min(1))
+          .max(20)
+          .optional()
+          .describe('Company form short names, e.g. ["A/S","ApS"]. Case-insensitive.'),
+        foundedAfter: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        foundedBefore: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        status: z.enum(['active', 'inactive', 'all']).default('active'),
+        postalCodes: z.array(z.number().int().min(1000).max(9999)).max(500).optional(),
+        postalCodeRanges: z
+          .array(z.object({ from: z.number().int().min(1000).max(9999), to: z.number().int().min(1000).max(9999) }))
+          .max(50)
+          .optional(),
+        region: z.enum(['hovedstaden', 'sjaelland', 'syddanmark', 'midtjylland', 'nordjylland']).optional(),
+        pageSize: z.number().int().min(1).max(100).optional().describe('Matches to return per call. Defaults to 25.'),
+        maxRequests: z
+          .number()
+          .int()
+          .min(10)
+          .max(MAX_SEGMENT_REQUEST_BUDGET)
+          .optional()
+          .describe(`Upstream request budget per call (search pages + entity fetches). Defaults to ${DEFAULT_SEGMENT_REQUEST_BUDGET}.`),
+        concurrency: z.number().int().min(1).max(MAX_BATCH_CONCURRENCY).optional(),
+        continuationToken: z.string().trim().min(1).optional().describe('Resume token from a previous cvr_segment_search response.'),
+        fields: fieldsSchema,
+      },
+      annotations: TOOL_ANNOTATIONS,
+    },
+    async (input, extra) =>
+      runAuditedTool('cvr_segment_search', input, async () =>
+        jsonToolResult(
+          await searchCvrSegment(client, input, {
+            signal: extra?.signal,
+            onProgress: makeSegmentProgressReporter(extra),
+          }),
+        ),
+      ),
   );
 
   server.registerTool(
@@ -348,6 +411,100 @@ export function registerCvrTools(server: McpServer, client: LassoClient): void {
   );
 
   server.registerTool(
+    'lassox_lists_index',
+    {
+      title: 'List Lassox Lists (Tags)',
+      description:
+        'Fetch the Lassox lists (tags) visible to the account: id, name, entity count, type, and permissions. Lists are curated in the Lasso portal (e.g. via its target-group search) and are the recommended source for broad segments. Pass userId to read a specific user\'s private lists.',
+      inputSchema: {
+        userId: z.string().trim().min(1).optional().describe('Lassox user id for private lists; omit for shared lists.'),
+      },
+      annotations: TOOL_ANNOTATIONS,
+    },
+    async input =>
+      runAuditedTool('lassox_lists_index', input, async () =>
+        jsonToolResult(await getLists(client, input)),
+      ),
+  );
+
+  server.registerTool(
+    'lassox_list_get_entities',
+    {
+      title: 'Get Lassox List Members',
+      description:
+        'Fetch the entities in a Lassox list (tag) with skip/take pagination. Find tag ids with lassox_lists_index. Pass fields to project each entity down to just the dot-paths you need.',
+      inputSchema: {
+        tagId: z.string().trim().min(1).describe('List (tag) id from lassox_lists_index.'),
+        skip: z.number().int().min(0).default(0),
+        take: z.number().int().min(1).max(1000).default(100),
+        fields: fieldsSchema,
+      },
+      annotations: TOOL_ANNOTATIONS,
+    },
+    async input =>
+      runAuditedTool('lassox_list_get_entities', input, async () =>
+        jsonToolResult(await getListEntities(client, input)),
+      ),
+  );
+
+  server.registerTool(
+    'lassox_list_change',
+    {
+      title: 'Change Lassox List Membership (WRITE)',
+      description:
+        'Add or remove entities (Lasso IDs) to/from Lassox lists (tags) in bulk. WRITE operation: modifies list membership in the shared Lasso portal — it never modifies CVR data. Idempotent per (entity, list) pair. Find tag ids with lassox_lists_index.',
+      inputSchema: {
+        lassoIds: z
+          .array(z.string().trim().regex(/^CVR-[123]-\d+$/, 'Each id must be a Lasso ID like CVR-1-34580820.'))
+          .min(1)
+          .max(MAX_LIST_CHANGE_IDS),
+        tagsToAdd: z.array(z.string().trim().min(1)).max(50).optional(),
+        tagsToRemove: z.array(z.string().trim().min(1)).max(50).optional(),
+      },
+      annotations: WRITE_TOOL_ANNOTATIONS,
+    },
+    async input =>
+      runAuditedTool('lassox_list_change', input, async () =>
+        jsonToolResult(await changeListMembers(client, input)),
+      ),
+  );
+
+  server.registerTool(
+    'cvr_get_changes',
+    {
+      title: 'Get CVR Changes (Delta)',
+      description:
+        'Fetch entities changed since a timestamp via the Lassox delta endpoints. scope selects companies, persons, places (production units), or annual reports. useLastLoad defaults to true (Lassox-recommended: filters on publication time so late-published changes are not missed). Optional lassoIds filters the page client-side to just those entities; fields projects each result. Paginate with continuationToken. For real-time needs, Lassox monitoring/webhooks are better than tight polling.',
+      inputSchema: {
+        scope: z.enum(['company', 'person', 'place', 'reports']).default('company'),
+        since: z
+          .string()
+          .trim()
+          .min(10)
+          .describe('Minimum update time, ISO date or datetime, e.g. 2026-07-01 or 2026-07-01T00:00:00.'),
+        max: z.string().trim().min(10).optional().describe('Optional maximum update time.'),
+        pageSize: z.number().int().min(1).max(1000).optional(),
+        continuationToken: z.string().trim().min(1).optional().describe('Continuation token from a previous response, sent as cToken.'),
+        useLastLoad: z.boolean().default(true),
+        maxDaysSinceUpdate: z.number().int().min(1).max(365).optional(),
+        history: z.boolean().default(false).describe('Return historical value wrappers. Not for scope "reports".'),
+        metadataOnly: z.boolean().optional().describe('Reports only: return metadata without full figures.'),
+        lassoIds: z
+          .array(z.string().trim().regex(/^CVR-[123]-\d+$/))
+          .max(1000)
+          .optional()
+          .describe('Client-side filter: only return changes for these Lasso IDs.'),
+        fields: fieldsSchema,
+      },
+      annotations: TOOL_ANNOTATIONS,
+    },
+    async input =>
+      runAuditedTool('cvr_get_changes', input, async () =>
+        jsonToolResult(await getCvrChanges(client, input)),
+      ),
+  );
+
+  server.registerTool(
     'cvr_get_related',
     {
       title: 'Get Related CVR Entities',
@@ -440,6 +597,29 @@ function makeProgressReporter(
   };
 }
 
+/** Progress notifications for segment scans, keyed on the request budget. */
+function makeSegmentProgressReporter(
+  extra: ProgressCapableExtra | undefined,
+): ((progress: SegmentProgress) => Promise<void>) | undefined {
+  const progressToken = extra?._meta?.progressToken;
+  const sendNotification = extra?.sendNotification;
+  if (progressToken === undefined || !sendNotification) {
+    return undefined;
+  }
+
+  return async progress => {
+    await sendNotification({
+      method: 'notifications/progress',
+      params: {
+        progressToken,
+        progress: progress.requestsUsed,
+        total: progress.requestBudget,
+        message: `postal ${progress.postalCode}: scanned ${progress.scanned}, matched ${progress.matched} (${progress.requestsUsed}/${progress.requestBudget} requests)`,
+      },
+    });
+  };
+}
+
 function auditTarget(input: unknown): unknown {
   if (!input || typeof input !== 'object') {
     return input;
@@ -469,6 +649,24 @@ function auditTarget(input: unknown): unknown {
     ingoingDepth: value.ingoingDepth,
     outgoingDepth: value.outgoingDepth,
     onDate: value.onDate,
+    industryCodes: value.industryCodes,
+    employeesMin: value.employeesMin,
+    employeesMax: value.employeesMax,
+    companyForms: value.companyForms,
+    region: value.region,
+    postalCodeCount: Array.isArray(value.postalCodes) ? value.postalCodes.length : undefined,
+    postalCodeRanges: value.postalCodeRanges,
+    maxRequests: value.maxRequests,
+    tagId: value.tagId,
+    userId: value.userId,
+    lassoIdCount: Array.isArray(value.lassoIds) ? value.lassoIds.length : undefined,
+    tagsToAdd: value.tagsToAdd,
+    tagsToRemove: value.tagsToRemove,
+    scope: value.scope,
+    since: value.since,
+    max: value.max,
+    useLastLoad: value.useLastLoad,
+    metadataOnly: value.metadataOnly,
   };
 }
 

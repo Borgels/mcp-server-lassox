@@ -7,7 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.1] - 2026-06-17
+## [0.4.0] - 2026-07-13
+
+### Added
+
+- `cvr_segment_search` tool — firmographic discovery: find companies by DB07
+  industry code prefix (main + alt industries), employee count (registered
+  count with `ANTAL_*` interval fallback), company form, and founding date,
+  anchored to a geography (postal codes, postal ranges, or one of the five
+  Danish regions mapped to approximate postal ranges). The Lassox search API
+  only supports text + address/contact filters server-side, so the tool scans
+  companies per postal code via filter-only searches, fetches candidates with
+  the existing rate-limit-aware batch machinery, and applies the firmographic
+  criteria locally. Every call is bounded by a `maxRequests` budget and
+  resumable via a criteria-bound `continuationToken`; progress notifications
+  are emitted when the client sends a `progressToken`. Broad nationwide
+  segments are intentionally out of scope — curate those in the Lasso portal
+  and consume them via the Lists tools.
+- Lists (tags) tools bridging segments curated in the Lasso portal:
+  `lassox_lists_index` (all visible lists, optional `userId` for private
+  lists), `lassox_list_get_entities` (members with skip/take pagination and
+  `fields` projection), and `lassox_list_change` (bulk add/remove of Lasso IDs
+  to/from lists). `lassox_list_change` is the server's first and only write
+  tool: it changes list membership only, never CVR data, and is explicitly
+  allowlisted as a write in the policy module, annotated
+  `readOnlyHint: false`, and disabled by default in the gateway export.
+- `cvr_get_changes` tool — wraps the Lassox delta endpoints
+  (`/data/cvr/{company|person|place}/delta` and `/data/cvr/reports/delta`) for
+  keeping downstream systems in sync. Supports `since`/`max`, pagination,
+  `history`, `metadataOnly` (reports), optional client-side `lassoIds`
+  filtering, and `fields` projection. `useLastLoad` defaults to `true` per the
+  Lassox recommendation (upstream flips its default on 2026-08-01).
+
+### Changed
+
+- The capability catalogue, policy allowlist, and gateway export now
+  distinguish `read` from `write` risk levels.
 
 ### Added
 
