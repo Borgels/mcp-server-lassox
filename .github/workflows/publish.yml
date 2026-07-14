@@ -23,6 +23,8 @@ jobs:
         with:
           context: .
           push: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/borgels/mcp-server-lassox
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:${{ github.sha }}
